@@ -1,0 +1,5 @@
+{
+  "name": "LuminaCircuit - Interactive Circuit Simulator",
+  "description": "A high-fidelity, interactive circuit simulator with drag-and-drop components, dynamic wiring, and real-time simulation logic, featuring an AI-powered circuit analyst.",
+  "requestFramePermissions": []
+}
