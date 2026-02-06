@@ -28,6 +28,50 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
   const { type, state, x, y, terminals, value, current, isBlown, maxCurrent, flipped } = component;
   const [isInteracting, setIsInteracting] = useState(false);
 
+  // Unified handler for adjusting component values (Knobs and Sliders)
+  const startAdjustment = (
+    e: React.MouseEvent | React.TouchEvent, 
+    adjustmentType: 'vertical' | 'horizontal',
+    sensitivity: number,
+    updateFn: (delta: number) => void
+  ) => {
+    e.stopPropagation();
+    // Do not preventDefault on start to allow focus/standard behaviors, 
+    // but we'll preventDefault on Move to stop scrolling.
+    
+    setIsInteracting(true);
+    const isTouch = 'touches' in e;
+    const startPos = isTouch ? e.touches[0] : (e as React.MouseEvent);
+    const startX = startPos.clientX;
+    const startY = startPos.clientY;
+
+    const onMove = (moveEv: MouseEvent | TouchEvent) => {
+      // Prevent scrolling the page while adjusting components
+      if (moveEv.cancelable) moveEv.preventDefault();
+      
+      const currentPos = 'touches' in moveEv ? moveEv.touches[0] : (moveEv as MouseEvent);
+      const delta = adjustmentType === 'vertical' 
+        ? (startY - currentPos.clientY) * sensitivity
+        : (currentPos.clientX - startX) * sensitivity;
+      
+      updateFn(delta);
+    };
+
+    const onEnd = () => {
+      setIsInteracting(false);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onEnd);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onEnd);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onEnd);
+    // passive: false is required to allow preventDefault inside the listener
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onEnd);
+  };
+
   const renderVisual = () => {
     switch (type) {
       case ComponentType.BATTERY:
@@ -44,6 +88,7 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
           </g>
         );
       case ComponentType.SOLAR_PANEL:
+        const solarStartVal = value || 50;
         return (
           <g transform={`translate(-45, -35) ${flipped ? 'rotate(180, 45, 35)' : ''}`}>
             <rect width="90" height="70" rx="4" className="fill-blue-950 stroke-blue-800 stroke-2" />
@@ -55,20 +100,13 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
             <circle cx={45} cy={-25} r={10} className="fill-yellow-500 blur-[2px] animate-pulse opacity-80" />
             
             <rect x="20" y="88" width="50" height="4" rx="2" className="fill-slate-800" />
-            <circle cx={20 + (value || 50) / 2} cy="90" r="6" className="fill-yellow-500 stroke-slate-900 stroke-1 cursor-ew-resize"
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                setIsInteracting(true);
-                const startX = e.clientX;
-                const startVal = value || 50;
-                const onMove = (me: MouseEvent) => {
-                  const delta = (me.clientX - startX) * 0.5;
-                  onUpdateValue(Math.max(0, Math.min(100, startVal + delta)));
-                };
-                const onUp = () => { setIsInteracting(false); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-                window.addEventListener('mousemove', onMove);
-                window.addEventListener('mouseup', onUp);
-              }}
+            <circle 
+              cx={20 + (value || 50) / 2} 
+              cy="90" 
+              r="10" 
+              className={`transition-colors ${isInteracting ? 'fill-yellow-300' : 'fill-yellow-500'} stroke-slate-900 stroke-1 cursor-ew-resize`}
+              onMouseDown={(e) => startAdjustment(e, 'horizontal', 0.5, (d) => onUpdateValue(Math.max(0, Math.min(100, solarStartVal + d))))}
+              onTouchStart={(e) => startAdjustment(e, 'horizontal', 0.5, (d) => onUpdateValue(Math.max(0, Math.min(100, solarStartVal + d))))}
             />
           </g>
         );
@@ -117,26 +155,20 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
           </g>
         );
       case ComponentType.POTENTIOMETER:
+        const potStartVal = value || 0;
         return (
           <g transform="translate(-40, -30)">
             <rect width="80" height="60" rx="8" className={`fill-slate-800 stroke-2 transition-colors ${isInteracting ? 'stroke-blue-400' : 'stroke-slate-600'}`} />
             <circle cx="40" cy="25" r="18" className={`transition-colors ${isInteracting ? 'fill-slate-600 stroke-blue-400' : 'fill-slate-700 stroke-slate-500'} stroke-2`} />
             <line x1="40" y1="25" x2={40 + 15 * Math.cos(((value! / 1000) * 1.5 - 0.75) * Math.PI)} y2={25 + 15 * Math.sin(((value! / 1000) * 1.5 - 0.75) * Math.PI)} className="stroke-blue-400 stroke-[3]" strokeLinecap="round" />
             <text x="40" y="52" textAnchor="middle" className={`text-[10px] font-mono font-bold transition-colors ${isInteracting ? 'fill-blue-400' : 'fill-blue-300'}`}>{value?.toFixed(0)} Ω</text>
-            <circle cx="40" cy="25" r="28" className="fill-transparent cursor-ns-resize" 
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                setIsInteracting(true);
-                const startY = e.clientY;
-                const startVal = value || 0;
-                const onMove = (me: MouseEvent) => {
-                  const delta = (startY - me.clientY) * 5;
-                  onUpdateValue(Math.max(0.1, Math.min(1000, startVal + delta)));
-                };
-                const onUp = () => { setIsInteracting(false); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-                window.addEventListener('mousemove', onMove);
-                window.addEventListener('mouseup', onUp);
-              }}
+            
+            {/* Larger interaction area for the knob */}
+            <circle 
+              cx="40" cy="25" r="28" 
+              className="fill-transparent cursor-ns-resize" 
+              onMouseDown={(e) => startAdjustment(e, 'vertical', 5, (d) => onUpdateValue(Math.max(0.1, Math.min(1000, potStartVal + d))))}
+              onTouchStart={(e) => startAdjustment(e, 'vertical', 5, (d) => onUpdateValue(Math.max(0.1, Math.min(1000, potStartVal + d))))}
             />
           </g>
         );
@@ -169,6 +201,7 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
           </g>
         );
       case ComponentType.LDR:
+        const ldrStartVal = value || 50;
         return (
           <g transform="translate(-40, -20)">
             <rect width="80" height="40" rx="20" className="fill-[#7c4d3a] stroke-slate-600 stroke-2" />
@@ -177,20 +210,13 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
             <text x="40" y="55" textAnchor="middle" className="fill-yellow-500 text-[8px] font-bold">{(value || 50).toFixed(0)}% Light</text>
             
             <rect x="15" y="60" width="50" height="4" rx="2" className="fill-slate-800" />
-            <circle cx={15 + (value || 50) / 2} cy="62" r="6" className="fill-yellow-500 stroke-slate-900 stroke-1 cursor-ew-resize"
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                setIsInteracting(true);
-                const startX = e.clientX;
-                const startVal = value || 50;
-                const onMove = (me: MouseEvent) => {
-                  const delta = (me.clientX - startX) * 0.5;
-                  onUpdateValue(Math.max(0, Math.min(100, startVal + delta)));
-                };
-                const onUp = () => { setIsInteracting(false); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-                window.addEventListener('mousemove', onMove);
-                window.addEventListener('mouseup', onUp);
-              }}
+            <circle 
+              cx={15 + (value || 50) / 2} 
+              cy="62" 
+              r="10" 
+              className={`transition-colors ${isInteracting ? 'fill-yellow-300' : 'fill-yellow-500'} stroke-slate-900 stroke-1 cursor-ew-resize`}
+              onMouseDown={(e) => startAdjustment(e, 'horizontal', 0.5, (d) => onUpdateValue(Math.max(0, Math.min(100, ldrStartVal + d))))}
+              onTouchStart={(e) => startAdjustment(e, 'horizontal', 0.5, (d) => onUpdateValue(Math.max(0, Math.min(100, ldrStartVal + d))))}
             />
           </g>
         );
@@ -217,6 +243,7 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
         );
       case ComponentType.FUSE:
         const progress = Math.min(1, (maxCurrent || 0.3) / 2);
+        const fuseStartLim = maxCurrent || 0.3;
         return (
           <g transform="translate(-40, -35)">
             <rect width="80" height="70" rx="8" className={`fill-slate-800 stroke-2 transition-colors ${isInteracting ? 'stroke-orange-400' : 'stroke-slate-600'}`} />
@@ -229,21 +256,13 @@ export const CircuitComponentView: React.FC<ComponentProps> = ({
               <g className="cursor-ew-resize">
                 <rect x="15" y="52" width="50" height="4" rx="2" className="fill-slate-700" />
                 <rect x="15" y="52" width={50 * progress} height="4" rx="2" className="fill-orange-500/50" />
-                <circle cx={15 + 50 * progress} cy="54" r="6" className={`transition-colors ${isInteracting ? 'fill-orange-400' : 'fill-slate-400'} stroke-slate-900 stroke-1`} />
-                <rect x="10" y="45" width="60" height="20" className="fill-transparent"
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    setIsInteracting(true);
-                    const startX = e.clientX;
-                    const startLim = maxCurrent || 0.3;
-                    const onMove = (me: MouseEvent) => {
-                      const delta = (me.clientX - startX) * 0.02;
-                      onUpdateProps({ maxCurrent: Math.max(0.05, Math.min(2, startLim + delta)) });
-                    };
-                    const onUp = () => { setIsInteracting(false); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-                    window.addEventListener('mousemove', onMove);
-                    window.addEventListener('mouseup', onUp);
-                  }}
+                <circle 
+                  cx={15 + 50 * progress} 
+                  cy="54" 
+                  r="10" 
+                  className={`transition-colors ${isInteracting ? 'fill-orange-400' : 'fill-slate-400'} stroke-slate-900 stroke-1`} 
+                  onMouseDown={(e) => startAdjustment(e, 'horizontal', 0.02, (d) => onUpdateProps({ maxCurrent: Math.max(0.05, Math.min(2, fuseStartLim + d)) }))}
+                  onTouchStart={(e) => startAdjustment(e, 'horizontal', 0.02, (d) => onUpdateProps({ maxCurrent: Math.max(0.05, Math.min(2, fuseStartLim + d)) }))}
                 />
               </g>
             ) : (

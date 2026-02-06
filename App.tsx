@@ -1,219 +1,1097 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { ComponentType, CircuitComponent, Wire, LabStats } from './types';
-import { simulate } from './services/simulationEngine';
-import { analyzeCircuit } from './services/geminiService';
-import { ComponentPalette } from './components/ComponentPalette';
-import { CircuitCanvas } from './components/CircuitCanvas';
+import React, { useState, useEffect } from 'react';
+import Sidebar from './components/Sidebar';
+import CourseCard from './components/CourseCard';
+import Login from './components/Login';
+import { Course, User, UserRole, View, Note, Quiz, ReportCard } from './types';
+import { INITIAL_USER, INITIAL_COURSES, ANNOUNCEMENTS, SCHOOL_EVENTS, SCHOOL_ACTIVITIES, UPCOMING_EXAMS, DETAILED_GRADES, STUDENT_ACHIEVEMENTS, SCHOOL_HIVE_POSTS, SCHOOL_CONTACTS, MOCK_ASSIGNMENTS } from './constants';
+import { summarizeNotes, generateQuizFromNotes } from './services/geminiService';
+import { syncSmsData } from './services/smsService';
 
 const App: React.FC = () => {
-  const [components, setComponents] = useState<CircuitComponent[]>([]);
-  const [wires, setWires] = useState<Wire[]>([]);
-  const [stats, setStats] = useState<LabStats>({ totalVoltage: 0, totalResistance: 0, totalCurrent: 0 });
-  const [analysis, setAnalysis] = useState<string>('Physics Lab initialized. Experiment with series and parallel circuits.');
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [user, setUser] = useState<User>(INITIAL_USER);
+  const [courses, setCourses] = useState<Course[]>(INITIAL_COURSES);
+  const [currentView, setCurrentView] = useState<View>('dashboard');
+  const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [calendarDate, setCalendarDate] = useState(new Date(2025, 3, 1));
+  const [calendarSubView, setCalendarSubView] = useState<'day' | 'week' | 'month'>('month');
   
-  // Responsive sidebar state based on Desktop (lg: 1024px+) vs Mobile/Tablet
-  const isDesktop = () => window.innerWidth >= 1024;
-  
-  const [sidebarOpen, setSidebarOpen] = useState(isDesktop());
+  // Dynamic Data States (Linked to SMS)
+  const [dynamicAnnouncements, setDynamicAnnouncements] = useState(ANNOUNCEMENTS);
+  const [dynamicExams, setDynamicExams] = useState(UPCOMING_EXAMS);
+  const [dynamicAssignments, setDynamicAssignments] = useState(MOCK_ASSIGNMENTS);
+  const [reportCard, setReportCard] = useState<ReportCard | null>(null);
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
 
-  // Listen for resize changes to ensure sidebar behavior stays consistent with device category
-  useEffect(() => {
-    const handleResize = () => {
-      if (isDesktop()) {
-        setSidebarOpen(true);
-      } else {
-        // If transitioning from desktop to tablet/phone, default to closed
-        if (sidebarOpen && window.innerWidth < 1024) {
-          // Optional: We can choose to keep it open or close it. 
-          // Closing it feels more natural for mobile interaction design.
-        }
-      }
-    };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [sidebarOpen]);
-
-  const runSimulation = useCallback((currentComponents: CircuitComponent[], currentWires: Wire[]) => {
-    const result = simulate(currentComponents, currentWires);
-    setComponents(result.components);
-    setWires(result.wires);
-    setStats(result.stats);
-  }, []);
-
-  const handleAddComponent = (type: ComponentType) => {
-    const id = `comp_${Date.now()}`;
-    const newComp: CircuitComponent = {
-      id,
-      type,
-      x: window.innerWidth / 2,
-      y: window.innerHeight / 2,
-      state: type === ComponentType.SWITCH,
-      value: type === ComponentType.POTENTIOMETER ? 500 : 0,
-      current: 0,
-      maxCurrent: type === ComponentType.FUSE ? 0.3 : undefined,
-      isBlown: false,
-      flipped: false,
-      terminals: [
-        { id: `${id}-0`, relX: -40, relY: 0, type: type === ComponentType.BATTERY ? 'pos' : 'generic' },
-        { id: `${id}-1`, relX: 40, relY: 0, type: type === ComponentType.BATTERY ? 'neg' : 'generic' },
-      ]
-    };
-    runSimulation([...components, newComp], wires);
-    // Auto-close menu on phone/tablet to show the component
-    if (!isDesktop()) {
-      setSidebarOpen(false);
+  const performSmsSync = async () => {
+    setIsLoading(true);
+    try {
+      const data = await syncSmsData(user.studentId || user.childId);
+      setDynamicAnnouncements(data.announcements);
+      setDynamicExams(data.exams);
+      setDynamicAssignments(data.assignments);
+      setReportCard(data.reportCard);
+      setLastSyncTime(data.lastSync);
+    } catch (err) {
+      console.error("Sync error");
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const handleUpdateComponent = (updatedComp: CircuitComponent) => {
-    runSimulation(components.map(c => c.id === updatedComp.id ? updatedComp : c), wires);
+  useEffect(() => {
+    if (isLoggedIn) {
+      performSmsSync();
+      if (user.role === UserRole.PARENT) {
+        setCurrentView('parent-portal');
+      }
+    }
+  }, [isLoggedIn, user.role]);
+
+  const handleLogin = (role: UserRole, email: string) => {
+    const newUser = { 
+      ...INITIAL_USER, 
+      role, 
+      email,
+      name: role === UserRole.PARENT ? 'Mrs. Johnson' : INITIAL_USER.name,
+      childId: role === UserRole.PARENT ? 'EDU-2025-001' : undefined
+    };
+    setUser(newUser);
+    setIsLoggedIn(true);
   };
 
-  const handleUpdateComponentProps = (id: string, props: Partial<CircuitComponent>) => {
-    runSimulation(components.map(c => c.id === id ? { ...c, ...props } : c), wires);
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setSelectedCourse(null);
+    setActiveQuiz(null);
+    setCurrentView('dashboard');
+    setIsSidebarOpen(false);
   };
 
-  const handleAddWire = (fromTerminalId: string, toTerminalId: string) => {
-    if (fromTerminalId === toTerminalId) return;
-    const existing = wires.find(w => 
-      (w.fromTerminalId === fromTerminalId && w.toTerminalId === toTerminalId) ||
-      (w.fromTerminalId === toTerminalId && w.toTerminalId === fromTerminalId)
-    );
-    if (existing) return;
-    const newWire: Wire = { id: `wire_${Date.now()}`, fromTerminalId, toTerminalId, isActive: false, current: 0 };
-    runSimulation(components, [...wires, newWire]);
+  const handleCourseClick = (course: Course) => {
+    setSelectedCourse(course);
+    setCurrentView('course-detail');
   };
 
-  const handleAnalyze = async () => {
-    if (components.length === 0) return;
-    setIsAnalyzing(true);
-    const result = await analyzeCircuit(components, wires);
-    setAnalysis(result);
-    setIsAnalyzing(false);
+  const handleSummarize = async (note: Note) => {
+    setIsLoading(true);
+    const summary = await summarizeNotes(note.content);
+    setCourses(prev => prev.map(c => {
+      if (c.id === selectedCourse?.id) {
+        return {
+          ...c,
+          notes: c.notes.map(n => n.id === note.id ? { ...n, summary } : n)
+        };
+      }
+      return c;
+    }));
+    setIsLoading(false);
   };
 
-  return (
-    <div className="flex flex-col lg:flex-row h-screen w-full bg-[#0a0f1a] text-slate-100 overflow-hidden select-none font-sans relative">
-      {/* 
-        Menu Bar (Header): 
-        Visible on Phone/Tablet (Portrait & Landscape).
-        Hidden on Computer/Laptop (lg:1024px+).
-      */}
-      <div className="lg:hidden flex items-center justify-between p-3 border-b border-slate-800 bg-[#111827] z-50 shadow-md">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-blue-600 rounded-md flex items-center justify-center">
-             <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-          </div>
-          <h1 className="text-lg font-bold text-blue-400">LuminaLab</h1>
-        </div>
-        <button 
-          onClick={() => setSidebarOpen(!sidebarOpen)} 
-          className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:scale-95 transition-transform"
-          aria-label="Toggle Equipment Menu"
-        >
-           <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={sidebarOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16m-7 6h7"} />
-           </svg>
-        </button>
-      </div>
+  const handleGenerateQuiz = async (note: Note) => {
+    if (!selectedCourse) return;
+    setIsLoading(true);
+    const questions = await generateQuizFromNotes(note.content);
+    const newQuiz: Quiz = {
+      id: `q-${Date.now()}`,
+      title: `Quiz: ${note.title}`,
+      questions,
+      courseId: selectedCourse.id
+    };
+    setCourses(prev => prev.map(c => {
+      if (c.id === selectedCourse.id) {
+        return { ...c, quizzes: [...c.quizzes, newQuiz] };
+      }
+      return c;
+    }));
+    setActiveQuiz(newQuiz);
+    setCurrentView('quiz-player');
+    setIsLoading(false);
+  };
 
-      {/* 
-        Sidebar:
-        Fixed static width on Desktop (Laptop/Computer).
-        Overlay Drawer on Mobile/Tablet.
-      */}
-      <aside className={`
-        fixed lg:static top-0 left-0 h-full bg-[#111827] border-r border-slate-800 
-        transition-all duration-300 ease-in-out z-40 flex flex-col shadow-2xl
-        ${sidebarOpen 
-          ? 'translate-x-0 w-72 lg:w-80 p-5 opacity-100' 
-          : '-translate-x-full w-0 p-0 opacity-0 overflow-hidden lg:translate-x-0 lg:w-0 lg:border-none'
-        }
-      `}>
-        {/* Sidebar Header (Laptop Only) */}
-        <div className="hidden lg:flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </div>
-          <h1 className="text-xl font-bold tracking-tight text-blue-400 whitespace-nowrap">LuminaLab Pro</h1>
-        </div>
-
-        {/* Real-time Telemetry */}
-        <div className="grid grid-cols-1 gap-2 bg-slate-900/80 p-4 rounded-xl border border-slate-700 shadow-inner mb-6">
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Net Potential</span>
-            <span className="text-sm font-mono text-emerald-400 font-bold">{stats.totalVoltage.toFixed(2)} V</span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Resistance (Req)</span>
-            <span className="text-sm font-mono text-amber-400">{stats.totalResistance.toFixed(1)} Ω</span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Current (It)</span>
-            <span className="text-sm font-mono text-blue-400">{(stats.totalCurrent * 1000).toFixed(1)} mA</span>
-          </div>
-        </div>
-
-        {/* Component Inventory */}
-        <div className="flex-grow overflow-y-auto custom-scrollbar min-h-0">
-          <ComponentPalette onAdd={handleAddComponent} />
-        </div>
-
-        {/* Lab Controls */}
-        <div className="mt-6 flex flex-col gap-3">
-          <button onClick={() => { setComponents([]); setWires([]); setStats({totalVoltage:0,totalResistance:0,totalCurrent:0}); if(!isDesktop()) setSidebarOpen(false); }} 
-            className="w-full py-3 px-4 rounded-xl bg-red-900/20 hover:bg-red-900/40 text-red-400 transition-all border border-red-900/30 text-[10px] font-bold uppercase tracking-widest active:scale-95">
-            Clear Laboratory
-          </button>
-
-          <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Physics Assistant</h3>
-              <button onClick={handleAnalyze} disabled={isAnalyzing} className="text-[10px] font-bold text-blue-400 hover:text-blue-300 disabled:opacity-50">
-                {isAnalyzing ? '...' : 'ANALYZE'}
-              </button>
+  const renderParentPortal = () => {
+    if (!reportCard) return null;
+    return (
+      <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+        <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+          <div className="space-y-2">
+            <h2 className="text-4xl font-black text-white uppercase tracking-tighter">Parental Oversight</h2>
+            <div className="flex items-center gap-3">
+               <div className="w-10 h-10 rounded-full bg-[#4ea59d]/20 flex items-center justify-center text-[#4ea59d]">
+                 <i className="fa-solid fa-child-reaching"></i>
+               </div>
+               <div>
+                  <p className="text-[#4ea59d] font-black text-[10px] uppercase tracking-[0.2em]">Student Record: Alex Johnson</p>
+                  <p className="text-slate-500 text-[9px] font-bold uppercase tracking-widest">{reportCard.term} Academic Session</p>
+               </div>
             </div>
-            <p className="text-[11px] leading-relaxed text-slate-400 italic font-medium line-clamp-4">
-              "{analysis}"
-            </p>
+          </div>
+          <div className="flex gap-4">
+            <button className="px-6 py-3 bg-[#4ea59d]/10 border border-[#4ea59d]/30 text-[#4ea59d] rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-[#4ea59d] hover:text-white transition-all">
+              <i className="fa-solid fa-file-pdf mr-2"></i> Download Full Report
+            </button>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] text-center">
+            <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest mb-2">Current GPA</p>
+            <p className="text-4xl font-black text-white">{reportCard.gpa}</p>
+          </div>
+          <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] text-center">
+            <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest mb-2">Class Rank</p>
+            <p className="text-4xl font-black text-white">{reportCard.rank}</p>
+          </div>
+          <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] text-center">
+            <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest mb-2">Attendance</p>
+            <p className="text-4xl font-black text-white">{reportCard.attendance}</p>
+          </div>
+          <div className="bg-[#4ea59d] p-8 rounded-[32px] text-center shadow-xl shadow-[#4ea59d]/20">
+            <p className="text-[10px] font-black text-white/70 uppercase tracking-widest mb-2">Standing</p>
+            <p className="text-4xl font-black text-white italic uppercase">Elite</p>
           </div>
         </div>
-      </aside>
 
-      {/* Simulation Workspace */}
-      <main className="flex-grow relative flex flex-col bg-[#0f172a] grid-bg touch-none">
-        {/* Floating Status Indicators */}
-        <div className="absolute top-4 right-4 lg:left-4 lg:right-auto z-10 flex bg-slate-800/80 backdrop-blur-md border border-slate-700 rounded-lg px-3 py-1.5 text-[10px] font-bold text-slate-400 shadow-xl items-center gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-            <span className="hidden sm:inline">REAL-TIME SOLVER ACTIVE</span>
-            <span className="sm:hidden">SOLVER ON</span>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
+          <div className="xl:col-span-2 bg-[#0f2624] rounded-[40px] border border-[#1f4e4a] overflow-hidden shadow-2xl">
+             <div className="p-8 border-b border-[#1f4e4a] bg-[#0a1a19]">
+                <h3 className="text-xl font-black text-white uppercase tracking-tight">Academic Performance breakdown</h3>
+             </div>
+             <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                   <thead className="bg-[#0a1a19]/50">
+                      <tr>
+                         <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Subject</th>
+                         <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Grade</th>
+                         <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Faculty Feedback</th>
+                      </tr>
+                   </thead>
+                   <tbody className="divide-y divide-[#1f4e4a]">
+                      {reportCard.subjects.map((sub, i) => (
+                         <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                            <td className="px-8 py-6">
+                               <p className="font-bold text-white text-sm">{sub.name}</p>
+                               <div className="w-32 h-1 bg-[#1f4e4a] rounded-full mt-2 overflow-hidden">
+                                  <div className="h-full bg-[#4ea59d]" style={{ width: `${sub.score}%` }}></div>
+                               </div>
+                            </td>
+                            <td className="px-8 py-6">
+                               <span className="text-xl font-black text-[#4ea59d]">{sub.grade}</span>
+                               <span className="ml-2 text-[9px] text-slate-500 font-bold uppercase">{sub.score}%</span>
+                            </td>
+                            <td className="px-8 py-6 text-xs text-slate-400 font-medium leading-relaxed italic max-w-sm">
+                               "{sub.comment}"
+                            </td>
+                         </tr>
+                      ))}
+                   </tbody>
+                </table>
+             </div>
           </div>
-          <div className="flex items-center gap-2 border-l border-slate-700 pl-4 text-blue-400">
-            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M14 5l7 7m0 0l-7 7m7-7H3" strokeWidth="3" /></svg>
-            <span className="hidden sm:inline">CONVENTIONAL FLOW</span>
-            <span className="sm:hidden">FLOW</span>
+
+          <div className="space-y-8">
+             <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+                <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8 flex items-center gap-3">
+                   <i className="fa-solid fa-wand-magic-sparkles text-[#4ea59d]"></i> AI Insight for Parents
+                </h3>
+                <div className="p-6 bg-[#4ea59d]/5 rounded-[32px] border border-[#4ea59d]/20 italic">
+                   <p className="text-xs text-slate-300 leading-relaxed">
+                      "Alex is demonstrating exceptional mastery in <strong>theoretical sciences</strong>. While their Data Structures performance is strong (88%), our AI analysis suggests focusing on <strong>recursion logic</strong> to reach the top percentile. Overall performance is in the <strong>top 4%</strong> of the cohort."
+                   </p>
+                </div>
+             </section>
+
+             <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+                <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">Contact Faculty</h3>
+                <div className="space-y-4">
+                   <button className="w-full py-4 bg-[#0a1a19] border border-[#1f4e4a] rounded-2xl flex items-center gap-4 px-6 group hover:border-[#4ea59d] transition-all">
+                      <div className="w-10 h-10 rounded-xl bg-purple-500/10 text-purple-500 flex items-center justify-center text-xs">
+                         <i className="fa-solid fa-message"></i>
+                      </div>
+                      <span className="text-[10px] font-black text-white uppercase tracking-widest">Message Head Teacher</span>
+                   </button>
+                   <button className="w-full py-4 bg-[#0a1a19] border border-[#1f4e4a] rounded-2xl flex items-center gap-4 px-6 group hover:border-[#4ea59d] transition-all">
+                      <div className="w-10 h-10 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center text-xs">
+                         <i className="fa-solid fa-video"></i>
+                      </div>
+                      <span className="text-[10px] font-black text-white uppercase tracking-widest">Schedule PTM Meeting</span>
+                   </button>
+                </div>
+             </section>
           </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTimetable = () => {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const monthName = calendarDate.toLocaleString('default', { month: 'long' });
+    const year = calendarDate.getFullYear();
+
+    const getEventsForDate = (date: Date) => {
+      const d = date.getDate();
+      const m = date.toLocaleString('default', { month: 'long' });
+      const dateStr = `${m} ${d < 10 ? '0' + d : d}`;
+      return {
+        exams: dynamicExams.filter(ex => ex.date.includes(dateStr)),
+        assignments: dynamicAssignments.filter(ass => ass.dueDate.includes(dateStr))
+      };
+    };
+
+    const handlePrev = () => {
+      const d = new Date(calendarDate);
+      if (calendarSubView === 'month') d.setMonth(d.getMonth() - 1);
+      else if (calendarSubView === 'week') d.setDate(d.getDate() - 7);
+      else d.setDate(d.getDate() - 1);
+      setCalendarDate(d);
+    };
+
+    const handleNext = () => {
+      const d = new Date(calendarDate);
+      if (calendarSubView === 'month') d.setMonth(d.getMonth() + 1);
+      else if (calendarSubView === 'week') d.setDate(d.getDate() + 7);
+      else d.setDate(d.getDate() + 1);
+      setCalendarDate(d);
+    };
+
+    const renderMonthGrid = () => {
+      const daysInMonth = new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1, 0).getDate();
+      const firstDay = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), 1).getDay();
+      const grid = [];
+      for (let i = 0; i < firstDay; i++) grid.push(null);
+      for (let i = 1; i <= daysInMonth; i++) grid.push(new Date(calendarDate.getFullYear(), calendarDate.getMonth(), i));
+
+      return (
+        <div className="bg-[#0f2624] rounded-[32px] border border-[#1f4e4a] overflow-hidden shadow-2xl min-w-[700px]">
+          <div className="grid grid-cols-7 border-b border-[#1f4e4a] bg-[#0a1a19]">
+            {days.map(day => <div key={day} className="py-4 text-center text-[10px] font-black uppercase tracking-widest text-slate-500">{day}</div>)}
+          </div>
+          <div className="grid grid-cols-7">
+            {grid.map((date, idx) => {
+              if (!date) return <div key={`empty-${idx}`} className="h-32 border-b border-r border-[#1f4e4a] bg-[#0a1a19]/30"></div>;
+              const { exams, assignments } = getEventsForDate(date);
+              const isToday = date.getDate() === 26 && date.getMonth() === 3;
+              return (
+                <div key={idx} className={`h-32 border-b border-r border-[#1f4e4a] p-3 transition-colors hover:bg-[#4ea59d]/5 relative group ${isToday ? 'bg-[#4ea59d]/5' : ''}`}>
+                  <span className={`text-[10px] font-black ${isToday ? 'bg-[#4ea59d] text-white w-6 h-6 flex items-center justify-center rounded-full' : 'text-slate-400'}`}>{date.getDate()}</span>
+                  <div className="mt-2 space-y-1">
+                    {exams.map((ex, i) => <div key={i} className="px-1.5 py-0.5 bg-orange-500/10 border border-orange-500/20 rounded text-[8px] font-black text-orange-500 truncate uppercase">{ex.subject}</div>)}
+                    {assignments.map((as, i) => <div key={i} className="px-1.5 py-0.5 bg-purple-500/10 border border-purple-500/20 rounded text-[8px] font-black text-purple-500 truncate uppercase">{as.title}</div>)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    };
+
+    const renderWeekGrid = () => {
+      const startOfWeek = new Date(calendarDate);
+      startOfWeek.setDate(calendarDate.getDate() - calendarDate.getDay());
+      const weekDates = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(startOfWeek);
+        d.setDate(startOfWeek.getDate() + i);
+        return d;
+      });
+      const hours = Array.from({ length: 13 }, (_, i) => i + 8);
+
+      return (
+        <div className="bg-[#0f2624] rounded-[32px] border border-[#1f4e4a] overflow-hidden shadow-2xl min-w-[800px]">
+          <div className="grid grid-cols-[80px_repeat(7,1fr)] border-b border-[#1f4e4a] bg-[#0a1a19]">
+            <div className="p-4"></div>
+            {weekDates.map((date, i) => (
+              <div key={i} className="py-4 text-center border-l border-[#1f4e4a]">
+                <div className="text-[10px] font-black uppercase text-slate-500">{days[i]}</div>
+                <div className="text-sm font-black text-white">{date.getDate()}</div>
+              </div>
+            ))}
+          </div>
+          <div className="max-h-[500px] overflow-y-auto custom-scrollbar">
+            {hours.map(hour => (
+              <div key={hour} className="grid grid-cols-[80px_repeat(7,1fr)] border-b border-[#1f4e4a]/50">
+                <div className="p-4 text-[10px] font-black text-slate-500 text-right uppercase">{hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}</div>
+                {weekDates.map((date, i) => {
+                  const { exams } = getEventsForDate(date);
+                  const isToday = date.getDate() === 26 && date.getMonth() === 3;
+                  return (
+                    <div key={i} className={`h-20 border-l border-[#1f4e4a] p-1 relative ${isToday ? 'bg-[#4ea59d]/5' : ''}`}>
+                      {hour === 10 && exams.length > 0 && (
+                        <div className="absolute inset-x-1 top-1 bottom-1 bg-orange-500/20 border-l-4 border-orange-500 p-1 rounded overflow-hidden">
+                           <p className="text-[7px] font-black text-orange-500 uppercase leading-none">Exam</p>
+                           <p className="text-[9px] font-bold text-white truncate mt-1">{exams[0].subject}</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const renderDayGrid = () => {
+      const hours = Array.from({ length: 15 }, (_, i) => i + 7);
+      const { exams, assignments } = getEventsForDate(calendarDate);
+      return (
+        <div className="bg-[#0f2624] rounded-[32px] border border-[#1f4e4a] overflow-hidden shadow-2xl max-w-3xl mx-auto">
+          <div className="p-6 bg-[#0a1a19] border-b border-[#1f4e4a] flex justify-between items-center">
+            <h3 className="text-xl font-black uppercase tracking-tighter text-white">{days[calendarDate.getDay()]}, {monthName} {calendarDate.getDate()}</h3>
+            <span className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Today's Focus</span>
+          </div>
+          <div className="p-6 space-y-6">
+            {hours.map(hour => {
+              const hasExam = hour === 10 && exams.length > 0;
+              const hasAssignment = hour === 18 && assignments.length > 0;
+              return (
+                <div key={hour} className="flex gap-6 group">
+                  <div className="w-16 text-right shrink-0 py-1 text-[10px] font-black text-slate-500 uppercase">{hour > 12 ? hour - 12 : hour} {hour >= 12 ? 'PM' : 'AM'}</div>
+                  <div className="flex-1 min-h-[60px] border-l-2 border-[#1f4e4a] pl-6 relative pb-6">
+                    <div className="absolute -left-[5px] top-2 w-2 h-2 rounded-full bg-[#1f4e4a] group-hover:bg-[#4ea59d] transition-colors"></div>
+                    {hasExam && (
+                      <div className="bg-orange-500/10 border border-orange-500/20 p-4 rounded-2xl animate-slideIn">
+                        <div className="flex justify-between items-start">
+                          <h4 className="text-sm font-black text-orange-500 uppercase">Exam: {exams[0].subject}</h4>
+                          <span className="text-[9px] font-bold bg-orange-500 text-white px-2 py-0.5 rounded uppercase">High Priority</span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1"><i className="fa-solid fa-location-dot mr-1"></i> {exams[0].venue}</p>
+                      </div>
+                    )}
+                    {hasAssignment && (
+                      <div className="bg-purple-500/10 border border-purple-500/20 p-4 rounded-2xl animate-slideIn">
+                        <h4 className="text-sm font-black text-purple-500 uppercase">Assignment: {assignments[0].title}</h4>
+                        <p className="text-xs text-slate-400 mt-1"><i className="fa-solid fa-clock mr-1"></i> Submission Deadline</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    };
+
+    return (
+      <div className="space-y-8 animate-fadeIn text-slate-100 pb-20">
+        <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+          <div className="space-y-2">
+            <h2 className="text-3xl md:text-4xl font-black text-white uppercase tracking-tighter italic">Calendar Studio</h2>
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-[#4ea59d] animate-pulse"></span>
+              <p className="text-[#4ea59d]/60 font-black text-[10px] uppercase tracking-[0.4em]">Interactive Campus Timeline</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex bg-[#0f2624] p-1 rounded-2xl border border-[#1f4e4a]">
+              {(['day', 'week', 'month'] as const).map(v => (
+                <button 
+                  key={v} 
+                  onClick={() => setCalendarSubView(v)}
+                  className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${calendarSubView === v ? 'bg-[#4ea59d] text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-4 bg-[#0f2624] p-2 rounded-2xl border border-[#1f4e4a]">
+              <button onClick={handlePrev} className="w-8 h-8 rounded-lg hover:bg-[#1f4e4a] flex items-center justify-center transition-all"><i className="fa-solid fa-chevron-left text-xs"></i></button>
+              <span className="text-xs font-black uppercase tracking-widest px-2">{calendarSubView === 'day' ? `${monthName} ${calendarDate.getDate()}` : `${monthName} ${year}`}</span>
+              <button onClick={handleNext} className="w-8 h-8 rounded-lg hover:bg-[#1f4e4a] flex items-center justify-center transition-all"><i className="fa-solid fa-chevron-right text-xs"></i></button>
+            </div>
+          </div>
+        </header>
+
+        <div className="overflow-x-auto pb-4 custom-scrollbar">
+          {calendarSubView === 'month' && renderMonthGrid()}
+          {calendarSubView === 'week' && renderWeekGrid()}
+          {calendarSubView === 'day' && renderDayGrid()}
+        </div>
+
+        <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] shadow-xl md:col-span-2">
+             <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+               <i className="fa-solid fa-calendar-check text-[#4ea59d]"></i> Summary of Events
+             </h3>
+             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {dynamicExams.map((ex, i) => (
+                  <div key={i} className="p-5 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] group hover:border-orange-500/50 transition-all">
+                     <div className="flex justify-between items-start mb-3">
+                       <span className="text-[8px] font-black px-2 py-1 bg-orange-500/10 text-orange-500 rounded uppercase tracking-widest">Exam</span>
+                       <span className="text-[9px] font-black text-slate-600 uppercase">{ex.date}</span>
+                     </div>
+                     <h4 className="text-sm font-bold text-white group-hover:text-orange-500 transition-colors">{ex.subject}</h4>
+                     <p className="text-[10px] text-slate-500 font-bold uppercase mt-2 italic"><i className="fa-solid fa-clock mr-1"></i> {ex.time}</p>
+                  </div>
+                ))}
+             </div>
+          </div>
+          <div className="bg-[#4ea59d]/5 border border-[#4ea59d]/20 p-8 rounded-[32px] flex flex-col items-center justify-center text-center space-y-4">
+             <div className="w-16 h-16 bg-[#4ea59d] rounded-full flex items-center justify-center text-white shadow-2xl shadow-[#4ea59d]/40">
+                <i className="fa-solid fa-plus text-2xl"></i>
+             </div>
+             <h4 className="text-lg font-black text-white uppercase tracking-tight">Sync Schedules</h4>
+             <p className="text-xs text-[#4ea59d] font-bold leading-relaxed">Connect your external calendar to auto-import course modules and assignment deadlines.</p>
+             <button className="w-full py-4 bg-[#4ea59d] text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl">Link Account</button>
+          </div>
+        </section>
+      </div>
+    );
+  };
+
+  const renderDashboard = () => (
+    <div className="space-y-8 animate-fadeIn text-slate-100 pb-10">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-black text-white uppercase tracking-tight italic">Dashboard Central</h2>
+          <p className="text-[#4ea59d]/60 text-[10px] font-black uppercase tracking-[0.4em]">Academic Overview</p>
+        </div>
+        <div className="flex items-center gap-4">
+           {lastSyncTime && (
+              <div className="hidden sm:flex flex-col items-end">
+                <span className="text-[8px] font-black uppercase text-[#4ea59d]">SMS System Linked</span>
+                <span className="text-[8px] text-slate-500">Last Sync: {lastSyncTime}</span>
+              </div>
+           )}
+           <button 
+             onClick={performSmsSync}
+             className="px-6 py-2.5 bg-[#1f4e4a] border border-[#4ea59d]/20 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-[#4ea59d] transition-all flex items-center gap-2"
+           >
+             <i className={`fa-solid fa-rotate ${isLoading ? 'animate-spin' : ''}`}></i> Sync with SMS
+           </button>
+        </div>
+      </header>
+
+      {/* Metric Row */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <div className="bg-[#4ea59d] p-8 rounded-[32px] text-white shadow-xl relative overflow-hidden md:col-span-2 group">
+          <div className="relative z-10">
+            <h3 className="text-[10px] font-black opacity-80 uppercase tracking-[0.2em] text-white">Academic Standing</h3>
+            <p className="text-5xl font-black my-4 text-white uppercase italic">Excellent</p>
+            <div className="mt-4 flex items-center gap-4">
+              <div className="h-2 flex-1 bg-white/20 rounded-full overflow-hidden">
+                 <div className="h-full bg-white w-[92%]"></div>
+              </div>
+              <span className="text-sm font-bold text-white">92%</span>
+            </div>
+          </div>
+          <div className="absolute -right-10 -bottom-10 w-48 h-48 bg-white/10 rounded-full blur-3xl group-hover:scale-110 transition-transform duration-700"></div>
         </div>
         
-        <CircuitCanvas 
-          components={components} 
-          wires={wires} 
-          onUpdateComponent={handleUpdateComponent}
-          onUpdateComponentProps={handleUpdateComponentProps}
-          onDeleteComponent={(id) => runSimulation(components.filter(c => c.id !== id), wires.filter(w => !w.fromTerminalId.startsWith(id) && !w.toTerminalId.startsWith(id)))}
-          onAddWire={handleAddWire}
-          onDeleteWire={(id) => runSimulation(components, wires.filter(w => w.id !== id))}
-        />
-      </main>
+        <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] flex flex-col justify-center">
+          <h3 className="text-[10px] font-black text-[#4ea59d] uppercase tracking-[0.2em]">Attendance</h3>
+          <p className="text-4xl font-black text-white my-2">98%</p>
+          <div className="flex items-center gap-2 text-[#4ea59d]/60 text-[10px] font-bold">
+            <i className="fa-solid fa-arrow-up"></i>
+            <span>2% Improvement</span>
+          </div>
+        </div>
 
-      {/* Sidebar Backdrop (Mobile & Tablet) */}
-      {sidebarOpen && !isDesktop() && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-30" onClick={() => setSidebarOpen(false)}></div>
+        <div className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] flex flex-col justify-center">
+          <h3 className="text-[10px] font-black text-[#4ea59d] uppercase tracking-[0.2em]">Portal Sync</h3>
+          <p className="text-4xl font-black text-white my-2">Live</p>
+          <button className="text-[#4ea59d] text-[10px] font-black uppercase text-left hover:underline">Updated 1m ago</button>
+        </div>
+      </div>
+
+      <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-2xl relative overflow-hidden">
+        <div className="flex items-center justify-between mb-8 relative z-10">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight flex items-center gap-4">
+            <div className="w-10 h-10 rounded-2xl bg-[#4ea59d]/10 flex items-center justify-center">
+              <i className="fa-solid fa-bell text-[#4ea59d] animate-swing"></i>
+            </div>
+            Recent Notifications
+          </h3>
+          <button className="text-[10px] font-black text-slate-500 uppercase tracking-widest hover:text-[#4ea59d] transition-colors">
+            Mark all as read
+          </button>
+        </div>
+        
+        <div className="space-y-4 relative z-10">
+          {[
+            { id: 1, title: 'Exam Approaching', desc: 'Modern Physics final is in 48 hours.', time: 'Just now', icon: 'fa-calendar-check', color: 'text-orange-500', bg: 'bg-orange-500/10' },
+            { id: 2, title: 'New Grade Released', desc: 'Quantum Mechanics Lab report has been graded.', time: '2h ago', icon: 'fa-file-invoice', color: 'text-blue-500', bg: 'bg-blue-500/10' },
+            { id: 3, title: 'School Hive Alert', desc: 'Dr. Sarah Smith posted a new update in the community.', time: '5h ago', icon: 'fa-users', color: 'text-purple-500', bg: 'bg-purple-500/10' },
+          ].map((notif) => (
+            <div key={notif.id} className="p-5 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] flex items-center gap-6 hover:border-[#4ea59d] transition-all cursor-pointer group">
+              <div className={`w-12 h-12 rounded-2xl ${notif.bg} ${notif.color} flex items-center justify-center text-xl shrink-0 group-hover:scale-110 transition-transform`}>
+                <i className={`fa-solid ${notif.icon}`}></i>
+              </div>
+              <div className="flex-1">
+                <div className="flex justify-between items-start">
+                  <h4 className="text-sm font-bold text-white mb-1">{notif.title}</h4>
+                  <span className="text-[9px] font-black text-slate-600 uppercase">{notif.time}</span>
+                </div>
+                <p className="text-xs text-slate-400 font-medium">{notif.desc}</p>
+              </div>
+              <div className="w-2 h-2 rounded-full bg-[#4ea59d] opacity-0 group-hover:opacity-100 transition-opacity"></div>
+            </div>
+          ))}
+        </div>
+        <div className="absolute top-0 right-0 w-64 h-64 bg-[#4ea59d]/5 blur-[100px] pointer-events-none"></div>
+      </section>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-3">
+            <i className="fa-solid fa-bullhorn text-[#4ea59d]"></i> Notice Board
+          </h3>
+          <div className="space-y-4">
+            {dynamicAnnouncements.map(item => (
+              <div key={item.id} className="p-6 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] group hover:border-[#4ea59d] transition-all">
+                <div className="flex justify-between items-center mb-2">
+                  <span className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase ${
+                    item.priority === 'High' ? 'bg-red-500/10 text-red-500' : 
+                    item.priority === 'Medium' ? 'bg-orange-500/10 text-orange-500' : 'bg-blue-500/10 text-blue-500'
+                  }`}>{item.priority} Priority</span>
+                  <span className="text-[9px] font-black text-slate-600 uppercase">{item.date}</span>
+                </div>
+                <h4 className="text-sm font-bold text-white mb-2">{item.title}</h4>
+                <p className="text-xs text-slate-400 line-clamp-2">{item.content}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Recent Grades</h3>
+          <div className="space-y-4">
+             {DETAILED_GRADES.slice(0, 3).map((item, i) => (
+               <div key={i} className="flex items-center justify-between p-6 bg-[#0a1a19] rounded-[32px] border border-[#1f4e4a]">
+                  <div>
+                    <h4 className="text-sm font-bold text-white">{item.assignment}</h4>
+                    <p className="text-[9px] font-black text-slate-600 uppercase mt-1">Academic Session 2025</p>
+                  </div>
+                  <p className="text-2xl font-black text-[#4ea59d]">{item.grade}</p>
+               </div>
+             ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+
+  const renderInstruction = () => (
+    <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+      <section className="relative h-72 rounded-[40px] overflow-hidden group">
+        <img src="https://images.unsplash.com/photo-1541339907198-e08759dfc3f0?auto=format&fit=crop&w=1200" className="w-full h-full object-cover opacity-40 grayscale group-hover:grayscale-0 transition-all duration-1000" />
+        <div className="absolute inset-0 bg-gradient-to-t from-[#0a1a19] to-transparent"></div>
+        <div className="absolute bottom-10 left-10">
+          <p className="text-[#4ea59d] font-black uppercase tracking-[0.4em] mb-2">About School</p>
+          <h2 className="text-5xl font-black text-white uppercase italic tracking-tighter">EduSphere Academy</h2>
+          <p className="max-w-xl text-slate-400 text-sm mt-4 leading-relaxed font-medium">
+            Pioneering the future of education through AI-integrated curricula and global mentorship. Our mission is to empower every learner to thrive in an era of rapid technological evolution.
+          </p>
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+        <div className="lg:col-span-2 space-y-12">
+          <section>
+            <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+              <i className="fa-solid fa-bullhorn text-[#4ea59d]"></i> School Announcements
+            </h3>
+            <div className="space-y-4">
+              {dynamicAnnouncements.map(ann => (
+                <div key={ann.id} className="p-6 bg-[#0f2624] rounded-3xl border border-[#1f4e4a] hover:border-[#4ea59d] transition-all group">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="bg-[#4ea59d]/10 text-[#4ea59d] px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest">{ann.priority} Priority</span>
+                    <span className="text-[10px] text-slate-600 font-bold uppercase">{ann.date}</span>
+                  </div>
+                  <h4 className="text-base font-bold text-white mb-2">{ann.title}</h4>
+                  <p className="text-xs text-slate-400 leading-relaxed">{ann.content}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+              <i className="fa-solid fa-masks-theater text-[#4ea59d]"></i> Student Activities
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {SCHOOL_ACTIVITIES.map((act, i) => (
+                <div key={i} className="p-8 bg-[#0f2624] rounded-[40px] border border-[#1f4e4a] group hover:bg-[#4ea59d]/5 transition-all">
+                  <div className="w-14 h-14 bg-[#4ea59d]/10 rounded-2xl flex items-center justify-center text-[#4ea59d] text-2xl mb-6 group-hover:scale-110 transition-transform">
+                    <i className={`fa-solid ${act.icon}`}></i>
+                  </div>
+                  <h4 className="text-lg font-bold text-white mb-2">{act.name}</h4>
+                  <p className="text-xs text-slate-500 leading-relaxed">{act.description}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+
+        <section className="space-y-8">
+           <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Upcoming Events</h3>
+           <div className="space-y-6">
+              {SCHOOL_EVENTS.map(ev => (
+                <div key={ev.id} className="relative h-48 rounded-[32px] overflow-hidden group cursor-pointer shadow-xl">
+                   <img src={ev.image} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent"></div>
+                   <div className="absolute bottom-6 left-6">
+                      <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest mb-1">{ev.type}</p>
+                      <h4 className="text-sm font-bold text-white uppercase">{ev.name}</h4>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase mt-1 italic"><i className="fa-solid fa-calendar mr-2"></i> {ev.date}</p>
+                   </div>
+                </div>
+              ))}
+           </div>
+        </section>
+      </div>
+    </div>
+  );
+
+  const renderActivity = () => (
+    <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+        <div className="space-y-2">
+          <h2 className="text-4xl font-black text-white uppercase tracking-tighter">Activity Portal</h2>
+          <p className="text-[#4ea59d]/60 font-black text-[10px] uppercase tracking-[0.4em]">Personal Academic Tracking</p>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
+        <div className="xl:col-span-2 space-y-12">
+           <section>
+              <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+                <i className="fa-solid fa-clipboard-list text-[#4ea59d]"></i> Pending Assignments
+              </h3>
+              <div className="space-y-4">
+                 {dynamicAssignments.map(ass => (
+                   <div key={ass.id} className="p-8 bg-[#0f2624] rounded-[32px] border border-[#1f4e4a] flex flex-col sm:flex-row justify-between items-center gap-6 group">
+                      <div className="flex-1">
+                         <div className="flex items-center gap-3 mb-2">
+                           <h4 className="text-lg font-bold text-white">{ass.title}</h4>
+                           <span className={`text-[8px] font-black px-2 py-0.5 rounded-full uppercase ${ass.status === 'Submitted' ? 'bg-green-500/10 text-green-500' : 'bg-orange-500/10 text-orange-500'}`}>
+                             {ass.status}
+                           </span>
+                         </div>
+                         <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{ass.course} • Due {ass.dueDate}</p>
+                      </div>
+                      <button className="px-6 py-3 bg-[#1f4e4a] hover:bg-[#4ea59d] text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all">Submit Task</button>
+                   </div>
+                 ))}
+              </div>
+           </section>
+
+           <section>
+              <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Grades & AI Feedback</h3>
+              <div className="overflow-hidden rounded-[32px] border border-[#1f4e4a] shadow-2xl">
+                 <table className="w-full text-left bg-[#0f2624]">
+                    <thead className="bg-[#0a1a19]">
+                       <tr>
+                          <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Assessment</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Mark</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">Faculty Insight</th>
+                       </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1f4e4a]">
+                       {DETAILED_GRADES.map((g, i) => (
+                          <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                             <td className="px-8 py-6 font-bold text-sm text-white">{g.assignment}</td>
+                             <td className="px-8 py-6 text-xl font-black text-[#4ea59d]">{g.grade}</td>
+                             <td className="px-8 py-6 text-xs text-slate-400 italic font-medium leading-relaxed max-w-sm">{g.feedback}</td>
+                          </tr>
+                       ))}
+                    </tbody>
+                 </table>
+              </div>
+           </section>
+        </div>
+
+        <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl h-fit sticky top-10">
+           <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Exam Schedule</h3>
+           <div className="space-y-6">
+              {dynamicExams.map((ex, i) => (
+                <div key={i} className="relative pl-6 border-l-2 border-[#4ea59d]/30 group">
+                   <div className="absolute left-[-5px] top-0 w-2 h-2 rounded-full bg-[#4ea59d] shadow-[0_0_10px_#4ea59d] group-hover:scale-150 transition-transform"></div>
+                   <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest">{ex.date} @ {ex.time}</p>
+                   <h4 className="text-sm font-bold text-white my-1">{ex.subject}</h4>
+                   <p className="text-[10px] text-slate-500 font-bold uppercase"><i className="fa-solid fa-location-dot mr-2"></i> {ex.venue}</p>
+                </div>
+              ))}
+           </div>
+           <button className="w-full mt-10 py-4 bg-[#4ea59d]/5 border border-[#4ea59d]/20 text-[#4ea59d] rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-[#4ea59d] hover:text-white transition-all">
+              Download Full Schedule
+           </button>
+        </section>
+      </div>
+    </div>
+  );
+
+  const renderCourses = () => (
+    <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+        <div className="space-y-2">
+          <h2 className="text-4xl font-black text-white uppercase tracking-tighter">Academic Catalog</h2>
+          <p className="text-[#4ea59d]/60 font-black text-[10px] uppercase tracking-[0.4em]">Explore available modules</p>
+        </div>
+      </header>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
+        {courses.map(course => (
+          <CourseCard key={course.id} course={course} onClick={() => handleCourseClick(course)} />
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderStudies = () => (
+    <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+        <div className="space-y-2">
+          <h2 className="text-4xl font-black text-white uppercase tracking-tighter">Academic Records</h2>
+          <p className="text-[#4ea59d]/60 font-black text-[10px] uppercase tracking-[0.4em]">Results & Achievements</p>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+        <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Exam Results</h3>
+          <div className="space-y-4">
+             {dynamicExams.map((ex, i) => (
+               <div key={i} className="p-6 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] flex justify-between items-center">
+                  <div>
+                    <h4 className="text-sm font-bold text-white">{ex.subject}</h4>
+                    <p className="text-[9px] font-black text-slate-500 uppercase">{ex.date}</p>
+                  </div>
+                  <span className={`text-lg font-black ${ex.result === 'Pending' ? 'text-orange-500' : 'text-[#4ea59d]'}`}>{ex.result}</span>
+               </div>
+             ))}
+          </div>
+        </section>
+
+        <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Assignment Results</h3>
+          <div className="space-y-4">
+             {DETAILED_GRADES.map((g, i) => (
+               <div key={i} className="p-6 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] flex justify-between items-center">
+                  <h4 className="text-sm font-bold text-white">{g.assignment}</h4>
+                  <span className="text-lg font-black text-[#4ea59d]">{g.grade}</span>
+               </div>
+             ))}
+          </div>
+        </section>
+
+        <section className="lg:col-span-2 bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+          <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8">Achievements & Badges</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+             {STUDENT_ACHIEVEMENTS.map(ach => (
+               <div key={ach.id} className="p-8 bg-[#0a1a19] rounded-[40px] border border-[#1f4e4a] text-center space-y-4 group hover:bg-[#4ea59d]/5 transition-all">
+                  <div className={`w-20 h-20 mx-auto rounded-[28px] bg-white/5 flex items-center justify-center text-4xl ${ach.color} group-hover:scale-110 transition-transform`}>
+                     <i className={`fa-solid ${ach.icon}`}></i>
+                  </div>
+                  <div>
+                    <h4 className="text-base font-black text-white uppercase">{ach.title}</h4>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{ach.desc}</p>
+                  </div>
+               </div>
+             ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+
+  const renderContact = () => (
+    <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+        <div className="space-y-2">
+          <h2 className="text-4xl font-black text-white uppercase tracking-tighter">Communications</h2>
+          <p className="text-[#4ea59d]/60 font-black text-[10px] uppercase tracking-[0.4em]">Connect with your community</p>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
+        <div className="xl:col-span-2 space-y-12">
+          <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+            <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+               <i className="fa-solid fa-hashtag text-[#4ea59d]"></i> School Hive
+            </h3>
+            <div className="space-y-6">
+               {SCHOOL_HIVE_POSTS.map(post => (
+                 <div key={post.id} className="p-8 bg-[#0a1a19] rounded-[32px] border border-[#1f4e4a]">
+                    <div className="flex justify-between items-start mb-4">
+                       <div className="flex items-center gap-4">
+                          <div className="w-10 h-10 rounded-full bg-[#4ea59d]/20 flex items-center justify-center text-[#4ea59d]">
+                             <i className="fa-solid fa-user"></i>
+                          </div>
+                          <div>
+                             <h4 className="text-sm font-bold text-white">{post.user}</h4>
+                             <p className="text-[9px] text-slate-600 font-black uppercase">{post.time}</p>
+                          </div>
+                       </div>
+                       <button className="text-slate-600 hover:text-white"><i className="fa-solid fa-ellipsis"></i></button>
+                    </div>
+                    <p className="text-sm text-slate-300 leading-relaxed mb-6">{post.content}</p>
+                    <div className="flex gap-6 border-t border-[#1f4e4a] pt-4">
+                       <button className="text-[10px] font-black text-[#4ea59d] uppercase tracking-widest flex items-center gap-2 hover:opacity-80">
+                          <i className="fa-solid fa-heart"></i> {post.likes}
+                       </button>
+                       <button className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2 hover:text-white">
+                          <i className="fa-solid fa-comment"></i> {post.replies}
+                       </button>
+                    </div>
+                 </div>
+               ))}
+            </div>
+          </section>
+        </div>
+
+        <div className="space-y-8">
+          <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+             <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">Direct Phone</h3>
+             <div className="space-y-4">
+                {SCHOOL_CONTACTS.phone.map((ph, i) => (
+                  <div key={i} className="p-5 bg-[#0a1a19] rounded-2xl border border-[#1f4e4a]">
+                     <p className="text-[9px] font-black text-[#4ea59d] uppercase mb-1">{ph.label}</p>
+                     <p className="text-base font-bold text-white">{ph.number}</p>
+                     <p className="text-[8px] text-slate-600 uppercase font-black">{ph.hours}</p>
+                  </div>
+                ))}
+             </div>
+          </section>
+
+          <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+             <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">Social Media</h3>
+             <div className="grid grid-cols-2 gap-4">
+                {SCHOOL_CONTACTS.socials.map((soc, i) => (
+                  <a key={i} href={soc.link} className="p-4 bg-[#0a1a19] rounded-2xl border border-[#1f4e4a] flex flex-col items-center gap-2 group transition-all hover:border-[#4ea59d]">
+                     <div className="text-xl" style={{ color: soc.color }}>
+                        <i className={`fa-brands ${soc.icon}`}></i>
+                     </div>
+                     <span className="text-[9px] font-black text-slate-500 group-hover:text-white uppercase">{soc.brand}</span>
+                  </a>
+                ))}
+             </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderCourseDetail = () => {
+    if (!selectedCourse) return null;
+    return (
+      <div className="space-y-12 animate-fadeIn text-slate-100 pb-20">
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-[#1f4e4a] pb-8">
+          <div className="space-y-4 flex-1">
+            <button onClick={() => setCurrentView('courses')} className="text-[#4ea59d] font-black uppercase text-[10px] tracking-widest flex items-center gap-2 group">
+              <i className="fa-solid fa-arrow-left transition-transform group-hover:-translate-x-1"></i> Back to Courses
+            </button>
+            <h2 className="text-5xl font-black text-white uppercase tracking-tight leading-none">{selectedCourse.title}</h2>
+            <div className="flex flex-wrap gap-4 pt-2">
+              <span className="bg-[#4ea59d]/10 text-[#4ea59d] px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border border-[#4ea59d]/20">
+                {selectedCourse.category}
+              </span>
+              <span className="bg-blue-500/10 text-blue-500 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border border-blue-500/20 flex items-center gap-2">
+                <i className="fa-solid fa-clock"></i> {selectedCourse.scheduleDescription}
+              </span>
+            </div>
+          </div>
+          {selectedCourse.onlineClassUrl && (
+            <a href={selectedCourse.onlineClassUrl} target="_blank" rel="noopener noreferrer" className="px-8 py-4 bg-[#4ea59d] text-white rounded-[24px] text-xs font-black uppercase tracking-[0.2em] shadow-xl shadow-[#4ea59d]/30 hover:scale-105 transition-all flex items-center gap-3">
+              <i className="fa-solid fa-video animate-pulse"></i> Join Online Class
+            </a>
+          )}
+        </header>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
+          <div className="xl:col-span-2 space-y-12">
+            <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+               <h3 className="text-2xl font-black text-white uppercase tracking-tight mb-6 flex items-center gap-4">
+                 <i className="fa-solid fa-compass text-[#4ea59d]"></i> Module Introduction
+               </h3>
+               <p className="text-slate-200 text-lg leading-relaxed italic">{selectedCourse.moduleIntro}</p>
+               <div className="mt-10 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {selectedCourse.topics.map((t, i) => (
+                    <div key={i} className="flex items-center gap-4 p-4 bg-[#0a1a19] rounded-2xl border border-[#1f4e4a]">
+                       <div className="w-8 h-8 rounded-full bg-[#4ea59d]/10 text-[#4ea59d] flex items-center justify-center text-xs font-black">
+                          {i + 1}
+                       </div>
+                       <span className="text-sm font-bold text-white">{t}</span>
+                    </div>
+                  ))}
+               </div>
+            </section>
+
+            <section className="bg-[#0f2624] p-10 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+               <h3 className="text-xl font-black text-white uppercase tracking-tight mb-8 flex items-center gap-4">
+                 <i className="fa-solid fa-book-open text-[#4ea59d]"></i> Learning Resources
+               </h3>
+               <div className="space-y-8">
+                 {selectedCourse.notes.map(note => (
+                   <div key={note.id} className="p-8 bg-[#0a1a19] rounded-[40px] border border-[#1f4e4a] space-y-6">
+                      <div className="flex justify-between items-start flex-col sm:flex-row gap-4">
+                        <h4 className="text-xl font-black text-white">{note.title}</h4>
+                        {note.ebookUrl && (
+                          <a href={note.ebookUrl} target="_blank" rel="noopener noreferrer" className="px-5 py-2.5 bg-[#4ea59d] text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 transition-all flex items-center gap-2">
+                             <i className="fa-solid fa-download"></i> Download Ebook
+                          </a>
+                        )}
+                      </div>
+                      <p className="text-base text-slate-300 leading-relaxed">{note.content}</p>
+                      <div className="flex flex-wrap gap-4 pt-4 border-t border-[#1f4e4a]">
+                        <button onClick={() => handleSummarize(note)} className="px-6 py-3 bg-[#4ea59d]/10 border border-[#4ea59d]/30 text-[#4ea59d] rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-[#4ea59d] hover:text-white transition-all">
+                          AI Summary
+                        </button>
+                        <button onClick={() => handleGenerateQuiz(note)} className="px-6 py-3 bg-orange-500/10 border border-orange-500/30 text-orange-500 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-orange-500 hover:text-white transition-all">
+                          Generate Quiz
+                        </button>
+                      </div>
+                      {note.summary && (
+                        <div className="mt-8 p-8 bg-[#4ea59d]/5 border-l-8 border-[#4ea59d] rounded-r-[32px] animate-slideIn">
+                           <p className="text-[10px] font-black text-[#4ea59d] uppercase tracking-[0.2em] mb-4 italic">AI Intelligent Summary</p>
+                           <p className="text-base text-slate-400 leading-relaxed">{note.summary}</p>
+                        </div>
+                      )}
+                   </div>
+                 ))}
+                 {selectedCourse.notes.length === 0 && (
+                   <div className="p-12 text-center bg-[#0a1a19] rounded-[40px] border border-dashed border-[#1f4e4a] text-slate-600 font-black uppercase tracking-widest italic">
+                     No notes uploaded yet.
+                   </div>
+                 )}
+               </div>
+            </section>
+          </div>
+
+          <div className="space-y-8">
+            <section className="bg-[#0f2624] p-8 rounded-[40px] border border-[#1f4e4a] shadow-xl">
+               <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">Faculty Details</h3>
+               <div className="space-y-6">
+                  <div className="p-6 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] flex items-center gap-4">
+                     <div className="w-14 h-14 rounded-2xl bg-purple-500/10 text-purple-500 flex items-center justify-center text-xl shrink-0">
+                        <i className="fa-solid fa-user-tie"></i>
+                     </div>
+                     <div>
+                        <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest">Faculty Lead</p>
+                        <p className="text-base font-bold text-white">{selectedCourse.subTeacherName || "Lead Professor"}</p>
+                     </div>
+                  </div>
+                  <div className="p-6 bg-[#0a1a19] rounded-3xl border border-[#1f4e4a] flex items-center gap-4">
+                     <div className="w-14 h-14 rounded-2xl bg-[#4ea59d]/10 text-[#4ea59d] flex items-center justify-center text-xl shrink-0">
+                        <i className="fa-solid fa-clock"></i>
+                     </div>
+                     <div>
+                        <p className="text-[9px] font-black text-slate-600 uppercase tracking-widest">Class Timetable</p>
+                        <p className="text-sm font-bold text-white leading-snug">{selectedCourse.scheduleDescription}</p>
+                     </div>
+                  </div>
+               </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderQuizPlayer = () => {
+    if (!activeQuiz) return null;
+    return (
+      <div className="space-y-8 animate-fadeIn text-slate-100 pb-20">
+        <header className="flex justify-between items-center">
+          <h2 className="text-3xl font-black text-white uppercase tracking-tight">{activeQuiz.title}</h2>
+          <button onClick={() => setCurrentView('course-detail')} className="px-6 py-3 bg-[#1f4e4a] hover:bg-[#4ea59d] text-white rounded-2xl text-xs font-bold transition-all">Exit Quiz</button>
+        </header>
+        <div className="max-w-3xl mx-auto space-y-6">
+          {activeQuiz.questions.map((q, qIdx) => (
+            <div key={qIdx} className="bg-[#0f2624] p-8 rounded-[32px] border border-[#1f4e4a] shadow-xl">
+              <h4 className="text-lg font-bold text-white mb-6 flex gap-4"><span className="text-[#4ea59d]">Q{qIdx + 1}.</span>{q.question}</h4>
+              <div className="grid grid-cols-1 gap-3">
+                {q.options.map((opt, oIdx) => (
+                  <button key={oIdx} className="p-5 text-left bg-[#0a1a19] border border-[#1f4e4a] rounded-2xl hover:border-[#4ea59d] transition-all text-sm">{opt}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <button onClick={() => { alert('Quiz submitted!'); setCurrentView('course-detail'); }} className="w-full py-5 bg-[#4ea59d] text-white rounded-[24px] font-black uppercase tracking-[0.2em] shadow-xl">Submit Answers</button>
+        </div>
+      </div>
+    );
+  };
+
+  if (!isLoggedIn) {
+    return <Login onLogin={handleLogin} />;
+  }
+
+  return (
+    <div className="flex flex-col md:flex-row bg-[#0a1a19] min-h-screen text-[#f1f5f9]">
+      <header className="md:hidden flex items-center justify-between p-4 bg-[#0f2624] border-b border-[#1f4e4a] sticky top-0 z-[50]">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-[#4ea59d] rounded-lg flex items-center justify-center text-white"><i className="fa-solid fa-graduation-cap"></i></div>
+          <h1 className="text-lg font-black tracking-tighter text-white uppercase italic">EduSphere</h1>
+        </div>
+        <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="text-white p-2">
+          <i className={`fa-solid ${isSidebarOpen ? 'fa-xmark' : 'fa-bars'} text-xl`}></i>
+        </button>
+      </header>
+
+      <Sidebar 
+        currentView={currentView} 
+        onViewChange={setCurrentView} 
+        onLogout={handleLogout}
+        userRole={user.role}
+        userEmail={user.email}
+        userName={user.name}
+        isOpen={isSidebarOpen}
+        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+      />
+      <main className={`flex-1 md:ml-72 p-6 md:p-8 overflow-x-hidden ${isSidebarOpen ? 'hidden md:block' : 'block'}`}>
+        {currentView === 'dashboard' && renderDashboard()}
+        {currentView === 'parent-portal' && renderParentPortal()}
+        {currentView === 'instruction' && renderInstruction()}
+        {currentView === 'activity' && renderActivity()}
+        {currentView === 'courses' && renderCourses()}
+        {currentView === 'course-detail' && renderCourseDetail()}
+        {currentView === 'quiz-player' && renderQuizPlayer()}
+        {currentView === 'studies' && renderStudies()}
+        {currentView === 'contact' && renderContact()}
+        {currentView === 'timetable' && renderTimetable()}
+        {currentView === 'profile' && (
+           <div className="space-y-8 animate-fadeIn text-slate-100">
+             <h2 className="text-2xl md:text-3xl font-black text-white uppercase tracking-tight">User Profile</h2>
+             <div className="bg-[#0f2624] p-6 md:p-10 rounded-[32px] md:rounded-[40px] border border-[#1f4e4a] max-w-2xl shadow-2xl relative overflow-hidden">
+                 <div className="flex flex-col md:flex-row gap-6 md:gap-10 items-center relative z-10">
+                     <img src={user.avatar} className="w-32 h-32 md:w-40 md:h-40 rounded-[24px] md:rounded-[40px] border-4 border-[#4ea59d] p-1 shadow-2xl object-cover" />
+                     <div className="flex-1 space-y-4 text-center sm:text-left">
+                         <div>
+                             <p className="text-[9px] font-black text-[#4ea59d] uppercase mb-1">Full Name</p>
+                             <h3 className="text-2xl md:text-3xl font-black text-white">{user.name}</h3>
+                         </div>
+                         <div className="grid grid-cols-1 gap-4 pt-4 border-t border-[#1f4e4a]">
+                             <div>
+                                 <p className="text-[9px] font-black text-slate-500 uppercase mb-1">Email Address</p>
+                                 <p className="text-xs font-bold text-slate-200">{user.email}</p>
+                             </div>
+                             <div>
+                                 <p className="text-[9px] font-black text-slate-500 uppercase mb-1">System Identifier</p>
+                                 <p className="text-xs font-mono font-bold text-[#4ea59d]">{user.studentId || user.childId || 'N/A'}</p>
+                             </div>
+                         </div>
+                     </div>
+                 </div>
+             </div>
+           </div>
+        )}
+      </main>
+      
+      {isLoading && (
+        <div className="fixed inset-0 bg-[#0a1a19]/80 backdrop-blur-md flex items-center justify-center z-[200] animate-fadeIn">
+          <div className="flex flex-col items-center">
+            <div className="w-20 h-20 border-4 border-[#4ea59d]/20 border-t-[#4ea59d] rounded-full animate-spin mb-6"></div>
+            <div className="text-white font-bold text-2xl tracking-tight">EduSphere AI is thinking...</div>
+            <p className="text-[#4ea59d] mt-2 animate-pulse uppercase text-[10px] font-black tracking-widest">Processing request</p>
+          </div>
+        </div>
       )}
     </div>
   );
